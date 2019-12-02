@@ -1,108 +1,152 @@
 import torch.nn as nn
+import torch.nn.functional as F
 import torch
 import math
 import time
 import torch.utils.model_zoo as model_zoo
-from utils import BasicBlock, Bottleneck, BBoxTransform, ClipBoxes
+from utils import BBoxTransform, ClipBoxes
 from anchors import Anchors
 import losses
-from lib.nms.pth_nms import pth_nms
+import numpy as np
+import geffnet
+from tqdm import tqdm 
 
-def nms(dets, thresh):
-    "Dispatch to either CPU or GPU NMS implementations.\
-    Accept dets as tensor"""
-    return pth_nms(dets, thresh)
+feature_sizes = [64, 88, 112, 160, 224, 288, 384, 384]
+geffnets = [geffnet.tf_efficientnet_b0, geffnet.tf_efficientnet_b1, geffnet.tf_efficientnet_b2, geffnet.tf_efficientnet_b3, 
+            geffnet.tf_efficientnet_b4, geffnet.tf_efficientnet_b5, geffnet.tf_efficientnet_b6, geffnet.tf_efficientnet_b7]
 
-model_urls = {
-    'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
-    'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
-    'resnet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
-    'resnet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
-    'resnet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth',
-}
+def nms(dets, iou_thr, device_id=None):
+    """Dispatch to either CPU or GPU NMS implementations.
+
+    The input can be either a torch tensor or numpy array. GPU NMS will be used
+    if the input is a gpu tensor or device_id is specified, otherwise CPU NMS
+    will be used. The returned type will always be the same as inputs.
+
+    Arguments:
+        dets (torch.Tensor or np.ndarray): bboxes with scores.
+        iou_thr (float): IoU threshold for NMS.
+        device_id (int, optional): when `dets` is a numpy array, if `device_id`
+            is None, then cpu nms is used, otherwise gpu_nms will be used.
+
+    Returns:
+        tuple: kept bboxes and indice, which is always the same data type as
+            the input.
+    """
+    # convert dets (tensor or numpy array) to tensor
+    if isinstance(dets, torch.Tensor):
+        is_numpy = False
+        dets_th = dets
+    elif isinstance(dets, np.ndarray):
+        is_numpy = True
+        device = 'cpu' if device_id is None else 'cuda:{}'.format(device_id)
+        dets_th = torch.from_numpy(dets).to(device)
+    else:
+        raise TypeError(
+            'dets must be either a Tensor or numpy array, but got {}'.format(
+                type(dets)))
+
+    # execute cpu or cuda nms
+    if dets_th.shape[0] == 0:
+        inds = dets_th.new_zeros(0, dtype=torch.long)
+    else:
+        if dets_th.is_cuda:
+            inds = nms_cuda.nms(dets_th, iou_thr)
+        else:
+            inds = nms_cpu.nms(dets_th, iou_thr)
+
+    if is_numpy:
+        inds = inds.cpu().numpy()
+    return dets[inds, :], inds
 
 class PyramidFeatures(nn.Module):
-    def __init__(self, C3_size, C4_size, C5_size, feature_size=256):
+    def __init__(self, size, feature_size=256, epsilon=0.0001, index=0):
         super(PyramidFeatures, self).__init__()
+        self.epsilon = epsilon
+        self.index = index
         
-        # upsample C5 to get P5 from the FPN paper
-        self.P5_1           = nn.Conv2d(C5_size, feature_size, kernel_size=1, stride=1, padding=0)
-        self.P5_upsampled   = nn.Upsample(scale_factor=2, mode='nearest')
-        self.P5_2           = nn.Conv2d(feature_size, feature_size, kernel_size=3, stride=1, padding=1)
-
-        # add P5 elementwise to C4
-        self.P4_1           = nn.Conv2d(C4_size, feature_size, kernel_size=1, stride=1, padding=0)
-        self.P4_upsampled   = nn.Upsample(scale_factor=2, mode='nearest')
-        self.P4_2           = nn.Conv2d(feature_size, feature_size, kernel_size=3, stride=1, padding=1)
-
-        # add P4 elementwise to C3
-        self.P3_1 = nn.Conv2d(C3_size, feature_size, kernel_size=1, stride=1, padding=0)
-        self.P3_2 = nn.Conv2d(feature_size, feature_size, kernel_size=3, stride=1, padding=1)
-
-        # "P6 is obtained via a 3x3 stride-2 conv on C5"
-        self.P6 = nn.Conv2d(C5_size, feature_size, kernel_size=3, stride=2, padding=1)
-
-        # "P7 is computed by applying ReLU followed by a 3x3 stride-2 conv on P6"
-        self.P7_1 = nn.ReLU()
-        self.P7_2 = nn.Conv2d(feature_size, feature_size, kernel_size=3, stride=2, padding=1)
+        self.p3 = nn.Conv2d(size[0], feature_size, kernel_size=1, stride=1, padding=0)
+        self.p4 = nn.Conv2d(size[1], feature_size, kernel_size=1, stride=1, padding=0)
+        self.p5 = nn.Conv2d(size[2], feature_size, kernel_size=1, stride=1, padding=0)
+        
+        # p6 is obtained via a 3x3 stride-2 conv on C5
+        self.p6 = nn.Conv2d(size[2], feature_size, kernel_size=3, stride=2, padding=1)
+        
+        # p7 is computed by applying ReLU followed by a 3x3 stride-2 conv on p6
+        self.p7 = nn.Sequential(
+            nn.ReLU(),
+            nn.Conv2d(feature_size, feature_size, kernel_size=3, stride=2, padding=1)
+        )
+        
+        self.p3_td = nn.Conv2d(feature_size, feature_size, kernel_size=1)
+        self.p4_td = nn.Conv2d(feature_size, feature_size, kernel_size=1)
+        self.p5_td = nn.Conv2d(feature_size, feature_size, kernel_size=1)
+        self.p6_td = nn.Conv2d(feature_size, feature_size, kernel_size=1)
+        self.p7_td = nn.Conv2d(feature_size, feature_size, kernel_size=1)
+        
+        self.p3_out = nn.Conv2d(feature_size, feature_size, kernel_size=1)
+        self.p4_out = nn.Conv2d(feature_size, feature_size, kernel_size=1)
+        self.p5_out = nn.Conv2d(feature_size, feature_size, kernel_size=1)
+        self.p6_out = nn.Conv2d(feature_size, feature_size, kernel_size=1)
+        self.p7_out = nn.Conv2d(feature_size, feature_size, kernel_size=1)
+        
+        # TODO: Init weights
+        self.w1 = nn.Parameter(torch.Tensor(2))
+        self.w1_relu = nn.ReLU()
+        self.w2 = nn.Parameter(torch.Tensor(3))
+        self.w2_relu = nn.ReLU()
+        
 
     def forward(self, inputs):
-
-        C3, C4, C5 = inputs
-
-        P5_x = self.P5_1(C5)
-        P5_upsampled_x = self.P5_upsampled(P5_x)
-        P5_x = self.P5_2(P5_x)
+        if self.index == 0:
+            c3, c4, c5 = inputs
+            # Calculate the input column of BiFPN
+            p3_x = self.p3(c3)        
+            p4_x = self.p4(c4)
+            p5_x = self.p5(c5)
+            p6_x = self.p6(c5)
+            p7_x = self.p7(p6_x)
+        else:
+            p3_x, p4_x, p5_x, p6_x, p7_x = inputs
         
-        P4_x = self.P4_1(C4)
-        P4_x = P5_upsampled_x + P4_x
-        P4_upsampled_x = self.P4_upsampled(P4_x)
-        P4_x = self.P4_2(P4_x)
+        # Calculate Top-Down Pathway
+        w1 = self.w1_relu(self.w1)
+        w1 /= torch.sum(w1, dim=0) + self.epsilon
+        w2 = self.w2_relu(self.w2)
+        w2 /= torch.sum(w2, dim=0) + self.epsilon
+        
+        p7_td = p7_x
+        p6_td = self.p6_td(w1[0] * p6_x + w1[1] * F.interpolate(p7_x, scale_factor=2, mode='nearest'))        
+        p5_td = self.p5_td(w1[0] * p5_x + w1[1] * F.interpolate(p6_x, scale_factor=2, mode='nearest'))
+        p4_td = self.p4_td(w1[0] * p4_x + w1[1] * F.interpolate(p5_x, scale_factor=2, mode='nearest'))
+        p3_td = self.p3_td(w1[0] * p3_x + w1[1] * F.interpolate(p4_x, scale_factor=2, mode='nearest'))
+        
+        # Calculate Bottom-Up Pathway
+        p7_out = self.p7_out(w2[0] * p7_x + w2[1] * p7_td + w2[2] * F.interpolate(p6_td, scale_factor=0.5, mode='nearest'))
+        p6_out = self.p6_out(w2[0] * p6_x + w2[1] * p6_td + w2[2] * F.interpolate(p5_td, scale_factor=0.5, mode='nearest'))
+        p5_out = self.p5_out(w2[0] * p5_x + w2[1] * p5_td + w2[2] * F.interpolate(p4_td, scale_factor=0.5, mode='nearest'))
+        p4_out = self.p4_out(w2[0] * p4_x + w2[1] * p4_td + w2[2] * F.interpolate(p3_td, scale_factor=0.5, mode='nearest'))
+        p3_out = p3_td
 
-        P3_x = self.P3_1(C3)
-        P3_x = P3_x + P4_upsampled_x
-        P3_x = self.P3_2(P3_x)
-
-        P6_x = self.P6(C5)
-
-        P7_x = self.P7_1(P6_x)
-        P7_x = self.P7_2(P7_x)
-
-        return [P3_x, P4_x, P5_x, P6_x, P7_x]
+        return [p3_out, p4_out, p5_out, p6_out, p7_out]
 
 
 class RegressionModel(nn.Module):
-    def __init__(self, num_features_in, num_anchors=9, feature_size=256):
+    def __init__(self, phi, num_anchors=9, feature_size=256):
         super(RegressionModel, self).__init__()
         
-        self.conv1 = nn.Conv2d(num_features_in, feature_size, kernel_size=3, padding=1)
-        self.act1 = nn.ReLU()
-
-        self.conv2 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        self.act2 = nn.ReLU()
-
-        self.conv3 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        self.act3 = nn.ReLU()
-
-        self.conv4 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        self.act4 = nn.ReLU()
-
+        num_class_layers = 3 + phi//3
+        
+        modules = []
+        
+        for i in range(num_class_layers):
+            modules.append(nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1))
+            modules.append(nn.ReLU())
+        
+        self.net = nn.Sequential(*modules)
         self.output = nn.Conv2d(feature_size, num_anchors*4, kernel_size=3, padding=1)
 
     def forward(self, x):
-
-        out = self.conv1(x)
-        out = self.act1(out)
-
-        out = self.conv2(out)
-        out = self.act2(out)
-
-        out = self.conv3(out)
-        out = self.act3(out)
-
-        out = self.conv4(out)
-        out = self.act4(out)
-
+        out = self.net(x)
         out = self.output(out)
 
         # out is B x C x W x H, with C = 4*num_anchors
@@ -111,41 +155,29 @@ class RegressionModel(nn.Module):
         return out.contiguous().view(out.shape[0], -1, 4)
 
 class ClassificationModel(nn.Module):
-    def __init__(self, num_features_in, num_anchors=9, num_classes=80, prior=0.01, feature_size=256):
+    def __init__(self, phi, num_anchors=9, num_classes=80, prior=0.01, feature_size=256):
         super(ClassificationModel, self).__init__()
 
         self.num_classes = num_classes
         self.num_anchors = num_anchors
         
-        self.conv1 = nn.Conv2d(num_features_in, feature_size, kernel_size=3, padding=1)
-        self.act1 = nn.ReLU()
-
-        self.conv2 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        self.act2 = nn.ReLU()
-
-        self.conv3 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        self.act3 = nn.ReLU()
-
-        self.conv4 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        self.act4 = nn.ReLU()
+        num_class_layers = 3 + phi//3
+        
+        modules = []
+        
+        for i in range(num_class_layers):
+            modules.append(nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1))
+            modules.append(nn.ReLU())
+        
+        self.net = nn.Sequential(*modules)
 
         self.output = nn.Conv2d(feature_size, num_anchors*num_classes, kernel_size=3, padding=1)
         self.output_act = nn.Sigmoid()
 
     def forward(self, x):
 
-        out = self.conv1(x)
-        out = self.act1(out)
-
-        out = self.conv2(out)
-        out = self.act2(out)
-
-        out = self.conv3(out)
-        out = self.act3(out)
-
-        out = self.conv4(out)
-        out = self.act4(out)
-
+        out = self.net(x)
+        
         out = self.output(out)
         out = self.output_act(out)
 
@@ -157,47 +189,30 @@ class ClassificationModel(nn.Module):
         out2 = out1.view(batch_size, width, height, self.num_anchors, self.num_classes)
 
         return out2.contiguous().view(x.shape[0], -1, self.num_classes)
-
-class ResNet(nn.Module):
-
-    def __init__(self, num_classes, block, layers):
-        self.inplanes = 64
-        super(ResNet, self).__init__()
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(block, 64, layers[0])
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
-
-        if block == BasicBlock:
-            fpn_sizes = [self.layer2[layers[1]-1].conv2.out_channels, self.layer3[layers[2]-1].conv2.out_channels, self.layer4[layers[3]-1].conv2.out_channels]
-        elif block == Bottleneck:
-            fpn_sizes = [self.layer2[layers[1]-1].conv3.out_channels, self.layer3[layers[2]-1].conv3.out_channels, self.layer4[layers[3]-1].conv3.out_channels]
-
-        self.fpn = PyramidFeatures(fpn_sizes[0], fpn_sizes[1], fpn_sizes[2])
-
-        self.regressionModel = RegressionModel(256)
-        self.classificationModel = ClassificationModel(256, num_classes=num_classes)
-
+    
+class EfficientDet(nn.Module):
+    def __init__(self, num_classes, phi):
+        feature_size = feature_sizes[phi]
+        super(EfficientDet, self).__init__()
+        
+        self.backbone = geffnets[phi](pretrained=True, drop_rate=0.25, drop_connect_rate=0.2)
+        
+        # Get backbone feature sizes. 
+        fpn_sizes = [40, 80, 192]
+        
+        self.fpn = [PyramidFeatures(fpn_sizes, feature_size=feature_size, index=index).cuda() for index in range(max(2+phi, 8))]
+        
+        self.regressionModel = RegressionModel(phi, feature_size=feature_size)
+        self.classificationModel = ClassificationModel(phi, feature_size=feature_size, num_classes=num_classes)
+        
         self.anchors = Anchors()
-
+        
         self.regressBoxes = BBoxTransform()
 
         self.clipBoxes = ClipBoxes()
         
         self.focalLoss = losses.FocalLoss()
-                
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-                m.weight.data.normal_(0, math.sqrt(2. / n))
-            elif isinstance(m, nn.BatchNorm2d):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
-
+        
         prior = 0.01
         
         self.classificationModel.output.weight.data.fill_(0)
@@ -205,50 +220,32 @@ class ResNet(nn.Module):
 
         self.regressionModel.output.weight.data.fill_(0)
         self.regressionModel.output.bias.data.fill_(0)
-
-        self.freeze_bn()
-
-    def _make_layer(self, block, planes, blocks, stride=1):
-        downsample = None
-        if stride != 1 or self.inplanes != planes * block.expansion:
-            downsample = nn.Sequential(
-                nn.Conv2d(self.inplanes, planes * block.expansion,
-                          kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(planes * block.expansion),
-            )
-
-        layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample))
-        self.inplanes = planes * block.expansion
-        for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes))
-
-        return nn.Sequential(*layers)
-
+        
     def freeze_bn(self):
         '''Freeze BatchNorm layers.'''
         for layer in self.modules():
             if isinstance(layer, nn.BatchNorm2d):
                 layer.eval()
-
+                
     def forward(self, inputs):
-
         if self.training:
             img_batch, annotations = inputs
         else:
             img_batch = inputs
-            
-        x = self.conv1(img_batch)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-
-        x1 = self.layer1(x)
-        x2 = self.layer2(x1)
-        x3 = self.layer3(x2)
-        x4 = self.layer4(x3)
-
-        features = self.fpn([x2, x3, x4])
+        
+        x = self.backbone.conv_stem(img_batch)
+        x = self.backbone.bn1(x)
+        x = self.backbone.act1(x)
+        
+        features = []
+        for block in self.backbone.blocks:
+            x = block(x)   
+            if block[0].conv_dw.stride == (2, 2):
+                features.append(x)
+        features = features[1:]
+                
+        for fpn_block in self.fpn:
+            features = fpn_block(features)
 
         regression = torch.cat([self.regressionModel(feature) for feature in features], dim=1)
 
@@ -280,57 +277,11 @@ class ResNet(nn.Module):
 
             return [nms_scores, nms_class, transformed_anchors[0, anchors_nms_idx, :]]
 
-
-
-def resnet18(num_classes, pretrained=False, **kwargs):
-    """Constructs a ResNet-18 model.
+def efficientdet(num_classes, pretrained=False, phi=0,**kwargs):
+    """Constructs a EfficientDet model.
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
+        phi (int)        : Scaling coefficient.
     """
-    model = ResNet(num_classes, BasicBlock, [2, 2, 2, 2], **kwargs)
-    if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet18'], model_dir='.'), strict=False)
-    return model
-
-
-def resnet34(num_classes, pretrained=False, **kwargs):
-    """Constructs a ResNet-34 model.
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = ResNet(num_classes, BasicBlock, [3, 4, 6, 3], **kwargs)
-    if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet34'], model_dir='.'), strict=False)
-    return model
-
-
-def resnet50(num_classes, pretrained=False, **kwargs):
-    """Constructs a ResNet-50 model.
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = ResNet(num_classes, Bottleneck, [3, 4, 6, 3], **kwargs)
-    if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet50'], model_dir='.'), strict=False)
-    return model
-
-def resnet101(num_classes, pretrained=False, **kwargs):
-    """Constructs a ResNet-101 model.
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = ResNet(num_classes, Bottleneck, [3, 4, 23, 3], **kwargs)
-    if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet101'], model_dir='.'), strict=False)
-    return model
-
-
-def resnet152(num_classes, pretrained=False, **kwargs):
-    """Constructs a ResNet-152 model.
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-    """
-    model = ResNet(num_classes, Bottleneck, [3, 8, 36, 3], **kwargs)
-    if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['resnet152'], model_dir='.'), strict=False)
+    model = EfficientDet(num_classes, phi, **kwargs)
     return model
