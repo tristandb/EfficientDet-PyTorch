@@ -1,8 +1,8 @@
 # PyTorch EfficientDet
 Here we implement [EfficientDet](https://arxiv.org/abs/1911.09070). The code is based on a RetinaNet implementation by [yhenon/pytorch-retinanet](https://github.com/yhenon/pytorch-retinanet). We use the EfficientNet backend by [rwightman/gen-efficientnet-pytorch](https://github.com/rwightman/gen-efficientnet-pytorch).
 
-## TODO
-Current implementation is able to run.
+## Current status
+Current implementation is able to run. I'll update this document as soon as I have some preliminary results. The paper by Tan et al. gives a few more details, which we would like to implement and report on:
 * Add depthwise separable convolution for feature fusion.
 * Add batch normalization and activation after each convolution with batch norm decay 0.997 and epsilon 1e-4.
 * Use exponential moving average with decay 0.9998.
@@ -10,7 +10,9 @@ Current implementation is able to run.
 * Initialize convolution layers
 * Train model using using SGD optimizer with momentum 0.9 and weight decay 4e-5.
 * Implement described learning rate, which is first linearly increased from 0 to 0.08 in the initial 5% warm-up training steps and then annealed down using cosine decay rule. 
-* Batch normalization is added after
+* Report performance.
+
+If you have other issues that need my attention, feel free to make a pull request or leave an [issue](https://github.com/tristandb/EfficientDet-PyTorch/issues). 
 
 ## Results
 
