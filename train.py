@@ -85,7 +85,7 @@ def main(args=None):
     # Create the model
     efficientdet = model.efficientdet(num_classes=dataset_train.num_classes(), pretrained=True, phi=parser.phi)      
 
-    use_gpu = True
+    use_gpu = torch.cuda.is_available()
 
     if use_gpu:
         efficientdet = efficientdet.cuda()
@@ -93,15 +93,22 @@ def main(args=None):
     efficientdet = torch.nn.DataParallel(efficientdet).cuda()
 
     efficientdet.training = True
+    
 
     optimizer = optim.Adam(efficientdet.parameters(), lr=1e-5)
 
+    
+    # TODO: Add learning rate scheduler
+    # Calculate 5% of warm-up training
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
 
     loss_hist = collections.deque(maxlen=500)
 
     efficientdet.train()
     efficientdet.module.freeze_bn()
+    
+    print(f"Number of parameters: {sum(p.numel() for p in efficientdet.parameters())}")
+    print(f"Number of trainable parameters: {sum(p.numel() for p in efficientdet.parameters() if p.requires_grad)}")
 
     print('Num training images: {}'.format(len(dataset_train)))
 

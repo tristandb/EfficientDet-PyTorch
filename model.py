@@ -77,17 +77,17 @@ class PyramidFeatures(nn.Module):
             nn.Conv2d(feature_size, feature_size, kernel_size=3, stride=2, padding=1)
         )
         
-        self.p3_td = nn.Conv2d(feature_size, feature_size, kernel_size=1)
-        self.p4_td = nn.Conv2d(feature_size, feature_size, kernel_size=1)
-        self.p5_td = nn.Conv2d(feature_size, feature_size, kernel_size=1)
-        self.p6_td = nn.Conv2d(feature_size, feature_size, kernel_size=1)
-        self.p7_td = nn.Conv2d(feature_size, feature_size, kernel_size=1)
+        self.p3_td = nn.Sequential(nn.Conv2d(feature_size, feature_size, kernel_size=1), nn.BatchNorm2d(feature_size, momentum=0.9997, eps=4e-5))
+        self.p4_td = nn.Sequential(nn.Conv2d(feature_size, feature_size, kernel_size=1), nn.BatchNorm2d(feature_size, momentum=0.9997, eps=4e-5))
+        self.p5_td = nn.Sequential(nn.Conv2d(feature_size, feature_size, kernel_size=1), nn.BatchNorm2d(feature_size, momentum=0.9997, eps=4e-5))
+        self.p6_td = nn.Sequential(nn.Conv2d(feature_size, feature_size, kernel_size=1), nn.BatchNorm2d(feature_size, momentum=0.9997, eps=4e-5))
+        self.p7_td = nn.Sequential(nn.Conv2d(feature_size, feature_size, kernel_size=1), nn.BatchNorm2d(feature_size, momentum=0.9997, eps=4e-5))
         
-        self.p3_out = nn.Conv2d(feature_size, feature_size, kernel_size=1)
-        self.p4_out = nn.Conv2d(feature_size, feature_size, kernel_size=1)
-        self.p5_out = nn.Conv2d(feature_size, feature_size, kernel_size=1)
-        self.p6_out = nn.Conv2d(feature_size, feature_size, kernel_size=1)
-        self.p7_out = nn.Conv2d(feature_size, feature_size, kernel_size=1)
+        self.p3_out = nn.Sequential(nn.Conv2d(feature_size, feature_size, kernel_size=1), nn.BatchNorm2d(feature_size, momentum=0.9997, eps=4e-5))
+        self.p4_out = nn.Sequential(nn.Conv2d(feature_size, feature_size, kernel_size=1), nn.BatchNorm2d(feature_size, momentum=0.9997, eps=4e-5))
+        self.p5_out = nn.Sequential(nn.Conv2d(feature_size, feature_size, kernel_size=1), nn.BatchNorm2d(feature_size, momentum=0.9997, eps=4e-5))
+        self.p6_out = nn.Sequential(nn.Conv2d(feature_size, feature_size, kernel_size=1), nn.BatchNorm2d(feature_size, momentum=0.9997, eps=4e-5))
+        self.p7_out = nn.Sequential(nn.Conv2d(feature_size, feature_size, kernel_size=1), nn.BatchNorm2d(feature_size, momentum=0.9997, eps=4e-5))
         
         # TODO: Init weights
         self.w1 = nn.Parameter(torch.Tensor(2))

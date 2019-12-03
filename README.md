@@ -4,7 +4,6 @@ Here we implement [EfficientDet](https://arxiv.org/abs/1911.09070). The code is 
 ## Current status
 Current implementation is able to run. I'll update this document as soon as I have some preliminary results. The paper by Tan et al. gives a few more details, which we would like to implement and report on:
 * Add depthwise separable convolution for feature fusion.
-* Add batch normalization and activation after each convolution with batch norm decay 0.997 and epsilon 1e-4.
 * Use exponential moving average with decay 0.9998.
 * Check if commonly-used focal loss [17] with alpha = 0:25 and gamma = 1:5, and aspect ratios.
 * Initialize convolution layers
@@ -15,6 +14,9 @@ Current implementation is able to run. I'll update this document as soon as I ha
 If you have other issues that need my attention, feel free to make a pull request or leave an [issue](https://github.com/tristandb/EfficientDet-PyTorch/issues). 
 
 ## Results
+
+Model | mAP | #Params | #FLOPS
+
 
 ## Installation
 
