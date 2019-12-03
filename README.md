@@ -5,7 +5,6 @@ Here we implement [EfficientDet](https://arxiv.org/abs/1911.09070). The code is 
 Current implementation is able to run. I'll update this document as soon as I have some preliminary results. The paper by Tan et al. gives a few more details, which we would like to implement and report on:
 * Add depthwise separable convolution for feature fusion.
 * Use exponential moving average with decay 0.9998.
-* Check if commonly-used focal loss [17] with alpha = 0:25 and gamma = 1:5, and aspect ratios.
 * Initialize convolution layers
 * Train model using using SGD optimizer with momentum 0.9 and weight decay 4e-5.
 * Implement described learning rate, which is first linearly increased from 0 to 0.08 in the initial 5% warm-up training steps and then annealed down using cosine decay rule. 
