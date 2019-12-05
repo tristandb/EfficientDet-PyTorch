@@ -200,7 +200,7 @@ class EfficientDet(nn.Module):
         # Get backbone feature sizes. 
         fpn_sizes = [40, 80, 192]
         
-        self.fpn = [PyramidFeatures(fpn_sizes, feature_size=feature_size, index=index).cuda() for index in range(max(2+phi, 8))]
+        self.fpn = [PyramidFeatures(fpn_sizes, feature_size=feature_size, index=index).cuda() for index in range(min(2+phi, 8))]
         
         self.regressionModel = RegressionModel(phi, feature_size=feature_size)
         self.classificationModel = ClassificationModel(phi, feature_size=feature_size, num_classes=num_classes)
