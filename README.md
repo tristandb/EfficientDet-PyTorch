@@ -3,7 +3,6 @@ Here we implement [EfficientDet](https://arxiv.org/abs/1911.09070). The code is 
 
 ## Current status
 Current implementation is able to run. I'll update this document as soon as I have some preliminary results. The paper by Tan et al. gives a few more details, which we would like to implement and report on:
-* Add depthwise separable convolution for feature fusion.
 * Use exponential moving average with decay 0.9998.
 * Initialize convolution layers
 * Train model using using SGD optimizer with momentum 0.9 and weight decay 4e-5.
@@ -30,7 +29,6 @@ apt-get install tk-dev python-tk
 3) Install the python packages:
 	
 ```
-pip install cffi
 
 pip install pandas
 
@@ -42,16 +40,8 @@ pip install opencv-python
 
 pip install requests
 
-pip install geffnet
+pip install efficientnet_pytorch
 
-```
-
-4) Build the NMS extension.
-
-```
-cd pytorch-retinanet/lib
-bash build.sh
-cd ../
 ```
 
 Note that you may have to edit line 14 of `build.sh` if you want to change which version of python you are building the extension for.
@@ -61,7 +51,7 @@ Note that you may have to edit line 14 of `build.sh` if you want to change which
 The network can be trained using the `train.py` script. Currently, two dataloaders are available: COCO and CSV. For training on coco, use
 
 ```
-python3 train.py --dataset coco --coco_path ../../Datasets/COCO2017 --phi 0 --batch-size 8
+python3 train.py --efficientnet --dataset coco --coco_path ../../Datasets/COCO2017 --scaling-compound 0 --batch-size 8
 ```
 
 For training using a custom dataset, with annotations in CSV format (see below), use
