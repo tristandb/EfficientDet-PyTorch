@@ -12,6 +12,8 @@ from efficientnet_pytorch import EfficientNet
 
 from bifpn import BiFPN
 
+from timeitdec import timeit
+
 
 class RegressionModel(nn.Module):
     def __init__(self, num_features_in, num_anchors=9, feature_size=64):
@@ -169,7 +171,7 @@ class EfficientDet(nn.Module):
         for layer in self.modules():
             if isinstance(layer, nn.BatchNorm2d):
                 layer.eval()
-
+    @timeit
     def forward(self, inputs):
 
         if self.training:

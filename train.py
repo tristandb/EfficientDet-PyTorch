@@ -46,7 +46,7 @@ def main(args=None):
     parser.add_argument('--csv_classes', help='Path to file containing class list (see readme)')
     parser.add_argument('--csv_val', help='Path to file containing validation annotations (optional, see readme)')
 
-    parser.add_argument('--depth', help='Resnet depth, must be one of 18, 34, 50, 101, 152', type=int, default=50)
+    parser.add_argument('--depth', help='Resnet depth, must be one of 18, 34, 50, 101, 152', type=int, default=None)
     parser.add_argument('--epochs', help='Number of epochs', type=int, default=100)
 
     parser = parser.parse_args(args)
@@ -99,7 +99,7 @@ def main(args=None):
     elif parser.depth == 152:
         model = retinanet.resnet152(num_classes=dataset_train.num_classes(), pretrained=True)
     elif parser.efficientdet:
-        model = efficientdet.efficientdet(num_classes=dataset_train.num_classes(), pretrained=True, phi=args.scaling_compound)
+        model = efficientdet.efficientdet(num_classes=dataset_train.num_classes(), pretrained=True, phi=parser.scaling_compound)
     else:
         raise ValueError('Unsupported model depth, must be one of 18, 34, 50, 101, 152')        
 
@@ -117,7 +117,7 @@ def main(args=None):
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
 
     loss_hist = collections.deque(maxlen=500)
-
+    
     model.train()
     model.module.freeze_bn()
 
