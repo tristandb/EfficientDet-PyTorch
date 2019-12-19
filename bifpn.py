@@ -12,7 +12,7 @@ class DepthwiseConvBlock(nn.Module):
     """
     def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, freeze_bn=False):
         super(DepthwiseConvBlock,self).__init__()
-        self.conv = nn.Conv2d(in_channels, in_channels, kernel_size, stride, 
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size, stride, 
                                padding, dilation, groups=in_channels, bias=False)
         self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, 
                                    stride=1, padding=0, dilation=1, groups=1, bias=False)
@@ -22,7 +22,7 @@ class DepthwiseConvBlock(nn.Module):
         self.act = nn.ReLU()
         
     def forward(self, inputs):
-        x = self.conv(inputs)
+        x = self.depthwise(inputs)
         x = self.pointwise(x)
         x = self.bn(x)
         return self.act(x)
@@ -35,12 +35,12 @@ class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, freeze_bn=False):
         super(ConvBlock,self).__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
-        #self.bn = nn.BatchNorm2d(out_channels, momentum=0.9997, eps=4e-5)
+        self.bn = nn.BatchNorm2d(out_channels, momentum=0.9997, eps=4e-5)
         self.act = nn.ReLU()
 
     def forward(self, inputs):
         x = self.conv(inputs)
-        #x = self.bn(x)
+        x = self.bn(x)
         return self.act(x)
 
 class BiFPNBlock(nn.Module):
@@ -103,7 +103,7 @@ class BiFPN(nn.Module):
         
         # p7 is computed by applying ReLU followed by a 3x3 stride-2 conv on p6
         self.p7 = ConvBlock(feature_size, feature_size, kernel_size=3, stride=2, padding=1)
-        
+
         bifpns = []
         for _ in range(num_layers):
             bifpns.append(BiFPNBlock(feature_size))

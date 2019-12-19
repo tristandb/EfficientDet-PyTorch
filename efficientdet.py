@@ -14,39 +14,23 @@ from bifpn import BiFPN
 
 from timeitdec import timeit
 
+w_bifpn = [64, 88, 112, 160, 224, 288, 384, 384]
 
 class RegressionModel(nn.Module):
-    def __init__(self, num_features_in, num_anchors=9, feature_size=64):
+    def __init__(self, num_features_in, d_class=3, num_anchors=9, feature_size=64):
         super(RegressionModel, self).__init__()
         
-        self.conv1 = nn.Conv2d(num_features_in, feature_size, kernel_size=3, padding=1)
-        self.act1 = nn.ReLU()
-
-        self.conv2 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        self.act2 = nn.ReLU()
-
-        self.conv3 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        self.act3 = nn.ReLU()
-
-        self.conv4 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        self.act4 = nn.ReLU()
+        prediction_net = []
+        for _ in range(d_class):
+            prediction_net.append(nn.Conv2d(num_features_in, feature_size, kernel_size=3, padding=1))
+            prediction_net.append(nn.ReLU())
+            num_features_in = feature_size
+        self.prediction_net = nn.Sequential(*prediction_net)
 
         self.output = nn.Conv2d(feature_size, num_anchors*4, kernel_size=3, padding=1)
 
     def forward(self, x):
-
-        out = self.conv1(x)
-        out = self.act1(out)
-
-        out = self.conv2(out)
-        out = self.act2(out)
-
-        out = self.conv3(out)
-        out = self.act3(out)
-
-        out = self.conv4(out)
-        out = self.act4(out)
-
+        out = self.prediction_net(x)
         out = self.output(out)
 
         # out is B x C x W x H, with C = 4*num_anchors
@@ -55,40 +39,25 @@ class RegressionModel(nn.Module):
         return out.contiguous().view(out.shape[0], -1, 4)
 
 class ClassificationModel(nn.Module):
-    def __init__(self, num_features_in, num_anchors=9, num_classes=80, prior=0.01, feature_size=64):
+    def __init__(self, num_features_in, num_anchors=9, d_class=3, num_classes=80, prior=0.01, feature_size=64):
         super(ClassificationModel, self).__init__()
 
         self.num_classes = num_classes
         self.num_anchors = num_anchors
         
-        self.conv1 = nn.Conv2d(num_features_in, feature_size, kernel_size=3, padding=1)
-        self.act1 = nn.ReLU()
-
-        self.conv2 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        self.act2 = nn.ReLU()
-
-        self.conv3 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        self.act3 = nn.ReLU()
-
-        self.conv4 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        self.act4 = nn.ReLU()
+        classification_net = []
+        for _ in range(d_class):
+            classification_net.append(nn.Conv2d(num_features_in, feature_size, kernel_size=3, padding=1))
+            classification_net.append(nn.ReLU())
+            num_features_in = feature_size
+        self.classification_net = nn.Sequential(*classification_net)
 
         self.output = nn.Conv2d(feature_size, num_anchors*num_classes, kernel_size=3, padding=1)
         self.output_act = nn.Sigmoid()
 
     def forward(self, x):
 
-        out = self.conv1(x)
-        out = self.act1(out)
-
-        out = self.conv2(out)
-        out = self.act2(out)
-
-        out = self.conv3(out)
-        out = self.act3(out)
-
-        out = self.conv4(out)
-        out = self.act4(out)
+        out = self.classification_net(x)
 
         out = self.output(out)
         out = self.output_act(out)
@@ -105,23 +74,27 @@ class ClassificationModel(nn.Module):
 class EfficientDet(nn.Module):
 
     def __init__(self, num_classes, block, pretrained=False, phi=0):
-        self.inplanes = 64
+        self.inplanes = w_bifpn[phi]
         super(EfficientDet, self).__init__()
         efficientnet = EfficientNet.from_pretrained(f'efficientnet-b{phi}')
         blocks = []
         count = 0
+        fpn_sizes = []
         for block in efficientnet._blocks:
             blocks.append(block)
             if block._depthwise_conv.stride == [2, 2]:
                 count += 1
-                if count >= 4:
+                fpn_sizes.append(block._project_conv.out_channels)
+                if len(fpn_sizes) >= 4:
                     break
+                    
         self.efficientnet = nn.Sequential(efficientnet._conv_stem, efficientnet._bn0, *blocks)
-        fpn_sizes = [40, 80, 192]
-        self.fpn = BiFPN(fpn_sizes, feature_size=64)
-
-        self.regressionModel = RegressionModel(64, feature_size=64)
-        self.classificationModel = ClassificationModel(64, feature_size=64, num_classes=num_classes)
+        num_layers = min(phi+2, 8)
+        self.fpn = BiFPN(fpn_sizes[1:], feature_size=w_bifpn[phi], num_layers=num_layers)
+        
+        d_class = 3 + (phi // 3)
+        self.regressionModel = RegressionModel(w_bifpn[phi], feature_size=w_bifpn[phi], d_class=d_class)
+        self.classificationModel = ClassificationModel(w_bifpn[phi], feature_size=w_bifpn[phi], d_class=d_class, num_classes=num_classes)
 
         self.anchors = Anchors()
 
@@ -129,7 +102,7 @@ class EfficientDet(nn.Module):
 
         self.clipBoxes = ClipBoxes()
         
-        self.focalLoss = losses.FocalLoss()
+        self.focalLoss = losses.FocalLoss().cuda()
                 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -171,14 +144,14 @@ class EfficientDet(nn.Module):
         for layer in self.modules():
             if isinstance(layer, nn.BatchNorm2d):
                 layer.eval()
-    @timeit
+
     def forward(self, inputs):
 
         if self.training:
             img_batch, annotations = inputs
         else:
             img_batch = inputs
-            
+                    
         x = self.efficientnet[0](img_batch)
         x = self.efficientnet[1](x)
         
@@ -189,8 +162,8 @@ class EfficientDet(nn.Module):
             if block._depthwise_conv.stride == [2, 2]:
                 features.append(x)
 
-        features = self.fpn(features[1:4])
-
+        features = self.fpn(features[1:])
+        
         regression = torch.cat([self.regressionModel(feature) for feature in features], dim=1)
 
         classification = torch.cat([self.classificationModel(feature) for feature in features], dim=1)

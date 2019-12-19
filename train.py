@@ -27,11 +27,17 @@ import coco_eval
 import csv_eval
 
 from tqdm import tqdm
+from ptflops import get_model_complexity_info
 
 #assert torch.__version__.split('.')[1] == '4'
 
 print('CUDA available: {}'.format(torch.cuda.is_available()))
 
+
+
+def freeze_layer(layer):
+    for param in layer.parameters():
+        param.requires_grad = False
 
 def main(args=None):
 
@@ -45,11 +51,15 @@ def main(args=None):
     parser.add_argument('--csv_train', help='Path to file containing training annotations (see readme)')
     parser.add_argument('--csv_classes', help='Path to file containing class list (see readme)')
     parser.add_argument('--csv_val', help='Path to file containing validation annotations (optional, see readme)')
+    
+    parser.add_argument('--print-model-complexity', help='Print model complexity.', action="store_true")
 
     parser.add_argument('--depth', help='Resnet depth, must be one of 18, 34, 50, 101, 152', type=int, default=None)
     parser.add_argument('--epochs', help='Number of epochs', type=int, default=100)
 
     parser = parser.parse_args(args)
+    
+    img_size = parser.scaling_compound * 128 + 512
 
     # Create the data loaders
     if parser.dataset == 'coco':
@@ -57,8 +67,8 @@ def main(args=None):
         if parser.coco_path is None:
             raise ValueError('Must provide --coco_path when training on COCO,')
 
-        dataset_train = CocoDataset(parser.coco_path, set_name='train2017', transform=transforms.Compose([Normalizer(), Augmenter(), Resizer()]))
-        dataset_val = CocoDataset(parser.coco_path, set_name='val2017', transform=transforms.Compose([Normalizer(), Resizer()]))
+        dataset_train = CocoDataset(parser.coco_path, set_name='train2017', transform=transforms.Compose([Normalizer(), Augmenter(), Resizer(img_size=img_size)]))
+        dataset_val = CocoDataset(parser.coco_path, set_name='val2017', transform=transforms.Compose([Normalizer(), Resizer(img_size=img_size)]))
 
     elif parser.dataset == 'csv':
 
@@ -69,13 +79,13 @@ def main(args=None):
             raise ValueError('Must provide --csv_classes when training on COCO,')
 
 
-        dataset_train = CSVDataset(train_file=parser.csv_train, class_list=parser.csv_classes, transform=transforms.Compose([Normalizer(), Augmenter(), Resizer()]))
+        dataset_train = CSVDataset(train_file=parser.csv_train, class_list=parser.csv_classes, transform=transforms.Compose([Normalizer(), Augmenter(), Resizer(img_size=img_size)]))
 
         if parser.csv_val is None:
             dataset_val = None
             print('No validation annotations provided.')
         else:
-            dataset_val = CSVDataset(train_file=parser.csv_val, class_list=parser.csv_classes, transform=transforms.Compose([Normalizer(), Resizer()]))
+            dataset_val = CSVDataset(train_file=parser.csv_val, class_list=parser.csv_classes, transform=transforms.Compose([Normalizer(), Resizer(img_size=img_size)]))
 
     else:
         raise ValueError('Dataset type not understood (must be csv or coco), exiting.')
@@ -101,7 +111,7 @@ def main(args=None):
     elif parser.efficientdet:
         model = efficientdet.efficientdet(num_classes=dataset_train.num_classes(), pretrained=True, phi=parser.scaling_compound)
     else:
-        raise ValueError('Unsupported model depth, must be one of 18, 34, 50, 101, 152')        
+        raise ValueError('Unsupported model depth, must be one of 18, 34, 50, 101, 152, or specify ')        
 
     use_gpu = True
 
@@ -109,6 +119,11 @@ def main(args=None):
         model = model.cuda()
     
     model = torch.nn.DataParallel(model).cuda()
+    
+    if parser.print_model_complexity:
+        flops, params = get_model_complexity_info(model, (3, img_size, img_size), as_strings=True, print_per_layer_stat=True)
+        print('{:<30}  {:<8}'.format('Computational complexity: ', flops))
+        print('{:<30}  {:<8}'.format('Number of parameters: ', params))
 
     model.training = True
 
@@ -128,41 +143,39 @@ def main(args=None):
         model.train()
         model.module.freeze_bn()
         
+        freeze_layer(model.module.efficientnet)
+                     
         epoch_loss = []
         pbar = tqdm(enumerate(dataloader_train), total=len(dataloader_train))
         for iter_num, data in pbar:
-            try:
-                optimizer.zero_grad()
+            optimizer.zero_grad()
 
-                classification_loss, regression_loss = model([data['img'].cuda().float(), data['annot']])
+            classification_loss, regression_loss = model([data['img'].cuda().float(), data['annot']])
 
-                classification_loss = classification_loss.mean()
-                regression_loss = regression_loss.mean()
+            classification_loss = classification_loss.mean()
+            regression_loss = regression_loss.mean()
 
-                loss = classification_loss + regression_loss
+            loss = classification_loss + regression_loss
                 
-                if bool(loss == 0):
-                    continue
-                
-                loss.backward()
-
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
-
-                optimizer.step()
-
-                loss_hist.append(float(loss))
-
-                epoch_loss.append(float(loss))
-                
-                mem = torch.cuda.memory_cached() / 1E9 if torch.cuda.is_available() else 0
-                pbar.set_description(f'{mem:.3g}G | {float(classification_loss):1.5f} | {float(regression_loss):1.5f} | {np.mean(loss_hist):1.5f}')
-                #print('Epoch: {} | Iteration: {} | Classification loss: {:1.5f} | Regression loss: {:1.5f} | Running loss: {:1.5f}'.format(epoch_num, iter_num, float(classification_loss), float(regression_loss), np.mean(loss_hist)))
-                
-                del classification_loss
-                del regression_loss
-            except Exception as e:
-                print(e)
+            if bool(loss == 0):
                 continue
+                
+            loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+
+            optimizer.step()
+
+            loss_hist.append(float(loss))
+
+            epoch_loss.append(float(loss))
+                
+            mem = torch.cuda.memory_cached() / 1E9 if torch.cuda.is_available() else 0
+            pbar.set_description(f'{mem:.3g}G | {float(classification_loss):1.5f} | {float(regression_loss):1.5f} | {np.mean(loss_hist):1.5f}')
+            #print('Epoch: {} | Iteration: {} | Classification loss: {:1.5f} | Regression loss: {:1.5f} | Running loss: {:1.5f}'.format(epoch_num, iter_num, float(classification_loss), float(regression_loss), np.mean(loss_hist)))
+                
+            del classification_loss
+            del regression_loss
 
         if parser.dataset == 'coco':
 
